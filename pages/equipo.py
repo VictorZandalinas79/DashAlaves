@@ -3,80 +3,258 @@ import sys
 import os
 from pathlib import Path
 import traceback
+import io
 
 # Importaciones de terceros
-from dash import Dash, html, dcc
+from dash import Dash, html, dcc, callback
 import dash_bootstrap_components as dbc
 from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
 import plotly.express as px
-from flask_caching import Cache
-import numpy as np
 import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Usar backend sin interfaz gráfica
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from mplsoccer import Pitch, VerticalPitch
+from scipy.ndimage import gaussian_filter
 from scipy.spatial import ConvexHull
-from plotly.subplots import make_subplots
-
-# Importaciones locales
-from data_manager_teams import DataManagerTeams
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Polygon
+import seaborn as sns
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import landscape, letter
+from PIL import Image
 
 # Configuración de colores y estilos
-BACKGROUND_COLOR = '#0E1117'
-LINE_COLOR = '#FFFFFF'
-TEXT_COLOR = '#FFFFFF'
+BACKGROUND_COLOR = '#f8f9fa'
+PRIMARY_COLOR = '#007bff'
+TEXT_COLOR = '#000000'
 HIGHLIGHT_COLOR = '#4BB3FD'
+LINE_COLOR = '#007bff'
 
-# Inicializar la aplicación Dash
-app = Dash(__name__, 
-    external_stylesheets=[dbc.themes.DARKLY],
-    suppress_callback_exceptions=True
-)
+# Clase para manejar la carga y gestión de datos
+class DataManager:
+    @staticmethod
+    def load_parquet_data(file_path):
+        """Carga datos desde un archivo Parquet"""
+        try:
+            # Leer el archivo Parquet
+            df = pd.read_parquet(file_path)
+            
+            # Convertir columnas a tipos de datos consistentes
+            df['equipo'] = df['equipo'].astype(str)
+            df['temporada'] = df['temporada'].astype(str)
+            
+            return df
+        except Exception as e:
+            print(f"Error cargando archivo {file_path}: {e}")
+            return None
 
-cache = Cache(app.server, config={
-    'CACHE_TYPE': 'filesystem',
-    'CACHE_DIR': 'cache-directory'
-})
+    @staticmethod
+    def get_filter_data(df):
+        """Obtiene datos de filtro"""
+        # Filtrar solo equipos de Alavés
+        equipos_alaves = [equipo for equipo in df['equipo'].unique() if 'Alavés' in str(equipo)]
+        
+        # Crear DataFrame de filtros solo con equipos de Alavés
+        df_filtros = df[df['equipo'].isin(equipos_alaves)][['equipo', 'temporada']].drop_duplicates()
+        
+        return df_filtros
 
-# Estilos personalizados
-custom_styles = {
-    'background': {
-        'backgroundColor': BACKGROUND_COLOR,
-        'color': TEXT_COLOR,
-        'padding': '20px'
-    },
-    'banner': {
-        'backgroundImage': "url('/assets/bunner_alaves3.png')",
-        'backgroundSize': 'cover',
-        'backgroundPosition': 'center',
-        'height': '150px',
-        'display': 'flex',
-        'alignItems': 'center',
-        'justifyContent': 'center',
-        'marginBottom': '2rem',
-        'borderRadius': '5px'
-    },
-    'banner_title': {
-        'color': 'white',
-        'textAlign': 'center',
-        'margin': '0',
-        'fontSize': '2.5rem',
-        'fontFamily': 'Arial, sans-serif',
-        'textShadow': '2px 2px 0 #000',
-        'fontWeight': '700',
-        'letterSpacing': '2px',
-        'WebkitTextStroke': '1px black'
-    },
-    'metric_card': {
-        'backgroundColor': '#262730',
-        'padding': '1rem',
-        'borderRadius': '5px',
-        'textAlign': 'center',
-        'color': TEXT_COLOR
-    }
-}
+    @staticmethod
+    def filter_data(df, team, season):
+        """Filtra datos por equipo y temporada"""
+        df_filtered = df[
+            (df['equipo'] == team) & 
+            (df['temporada'] == season)
+        ]
+        return df_filtered
+
+# Cargar datos globales
+BASE_DIR = Path(__file__).parent.parent
+PARQUET_PATH = os.path.join(BASE_DIR, "data", "archivos_parquet", "eventos_metricas_alaves.parquet")
+
+try:
+    GLOBAL_DATA = DataManager.load_parquet_data(PARQUET_PATH)
+    FILTER_DATA = DataManager.get_filter_data(GLOBAL_DATA)
+except Exception as e:
+    print(f"Error cargando datos globales: {e}")
+    GLOBAL_DATA = None
+    FILTER_DATA = None
 
 # Funciones de visualización
-def create_heatmap(df_equipos, team_name, season_ids):
-    """Crea el mapa de calor usando Plotly"""
+def create_team_advanced_metrics(df_combined, team_name, season_ids):
+    """
+    Crea un gráfico de métricas avanzadas para un equipo.
+    
+    Parámetros:
+    - df_combined: DataFrame con los datos combinados
+    - team_name: Nombre del equipo
+    - season_ids: Lista de IDs de temporadas
+    """
+    # Crear figura y eje
+    plt.figure(figsize=(12, 8), facecolor=BACKGROUND_COLOR)
+    
+    # Filtrar datos para el equipo y temporadas
+    df_team = df_combined[
+        (df_combined['equipo'] == team_name) & 
+        (df_combined['season_id'].isin(season_ids))
+    ].copy()
+    
+    # Definir métricas avanzadas de interés a nivel de equipo
+    metricas_avanzadas = [
+        ('Duelos Aéreos Ganados', 
+         ['duelos_aereos_ganados_zona_area', 'duelos_aereos_ganados_zona_baja', 
+          'duelos_aereos_ganados_zona_media', 'duelos_aereos_ganados_zona_alta']),
+        
+        ('Recuperaciones', 
+         ['recuperaciones_zona_baja', 'recuperaciones_zona_media', 'recuperaciones_zona_alta']),
+        
+        ('Entradas Ganadas', 
+         ['entradas_ganadas_zona_area', 'entradas_ganadas_zona_baja', 
+          'entradas_ganadas_zona_media', 'entradas_ganadas_zona_alta']),
+        
+        ('Pases Largos Exitosos', 
+         ['pases_largos_exitosos', 'cambios_orientacion_exitosos']),
+        
+        ('Pases Adelante', 
+         ['pases_adelante_inicio', 'pases_adelante_creacion']),
+        
+        ('Pases Horizontales', 
+         ['pases_horizontal_inicio', 'pases_horizontal_creacion'])
+    ]
+    
+    # Preparar datos para el gráfico
+    nombres_metricas = []
+    valores_metricas = []
+    
+    for nombre, columnas in metricas_avanzadas:
+        # Sumar valores de las columnas, convirtiendo a numérico
+        valores = []
+        for col in columnas:
+            # Convertir a numérico, reemplazando valores no numéricos con 0
+            df_team[col] = pd.to_numeric(df_team[col], errors='coerce').fillna(0)
+            valores.append(df_team[col].sum())
+        
+        # Sumar total de la métrica
+        total = sum(valores)
+        
+        nombres_metricas.append(nombre)
+        valores_metricas.append(total)
+    
+    # Crear gráfico de barras horizontal
+    colors = [PRIMARY_COLOR, '#50C878', '#FFD700', '#FF6B6B', '#9370DB', '#FF4500']
+    
+    y_pos = range(len(nombres_metricas))
+    plt.barh(y_pos, valores_metricas, align='center', color=colors)
+    
+    # Personalizar ejes
+    plt.yticks(y_pos, nombres_metricas, color=TEXT_COLOR)
+    plt.xlabel('Número de Acciones', color=TEXT_COLOR)
+    plt.title(f'Métricas Avanzadas: {team_name}', color=TEXT_COLOR, fontsize=14, pad=20)
+    
+    # Color de texto y ejes
+    plt.tick_params(colors=TEXT_COLOR)
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    plt.gca().spines['left'].set_color(TEXT_COLOR)
+    plt.gca().spines['bottom'].set_color(TEXT_COLOR)
+    
+    # Añadir valores en las barras
+    for i, v in enumerate(valores_metricas):
+        plt.text(v, i, f' {v:.0f}', color=TEXT_COLOR, va='center')
+    
+    # Estilo general
+    plt.gca().set_facecolor(BACKGROUND_COLOR)
+    plt.tight_layout()
+    
+    return plt.gcf()
+
+def create_team_pass_flow_map(df_equipos, team_name, season_ids):
+    """Crea el mapa de flujo de pases usando matplotlib y mplsoccer"""
+    # Configurar el pitch
+    pitch = Pitch(pitch_type='wyscout', pitch_color=BACKGROUND_COLOR, line_color=PRIMARY_COLOR)
+    
+    # Crear figura y eje
+    fig, ax = plt.subplots(figsize=(10, 8), facecolor=BACKGROUND_COLOR)
+    
+    # Filtrar pases
+    df_pases = df_equipos[
+        (df_equipos['equipo'] == team_name) &
+        (df_equipos['season_id'].isin(season_ids)) &
+        (df_equipos['tipo_evento'] == 'Pase')
+    ].copy()
+    
+    # Convertir columnas numéricas
+    for col in ['xstart', 'ystart', 'xend', 'yend']:
+        df_pases[col] = pd.to_numeric(df_pases[col], errors='coerce')
+    
+    # Filtrar pases con coordenadas válidas
+    df_pases_flujo = df_pases[
+        df_pases['xstart'].notna() &
+        df_pases['ystart'].notna() &
+        df_pases['xend'].notna() &
+        df_pases['yend'].notna()
+    ]
+    
+    # Dibujar el campo
+    pitch.draw(ax=ax)
+    
+    if not df_pases_flujo.empty:
+        # Configurar bins para el heatmap
+        bins = (6, 4)
+        
+        # Calcular estadísticas de los pases
+        heatmap = pitch.bin_statistic(
+            df_pases_flujo.ystart.astype(float),
+            df_pases_flujo.xstart.astype(float),
+            statistic='count',
+            bins=bins
+        )
+        
+        # Crear mapa de color personalizado
+        heatmap_cmap = LinearSegmentedColormap.from_list(
+            "custom_heatmap",
+            [BACKGROUND_COLOR, PRIMARY_COLOR]
+        )
+        
+        # Dibujar heatmap
+        pitch.heatmap(
+            heatmap,
+            ax=ax,
+            cmap=heatmap_cmap,
+            alpha=0.6
+        )
+        
+        # Intentar dibujar flujo de pases
+        try:
+            pitch.flow(
+                df_pases_flujo.ystart.astype(float),
+                df_pases_flujo.xstart.astype(float),
+                df_pases_flujo.yend.astype(float),
+                df_pases_flujo.xend.astype(float),
+                color=LINE_COLOR,
+                arrow_type='scale',
+                arrow_length=15,
+                bins=bins,
+                ax=ax,
+                zorder=2,
+                alpha=0.6
+            )
+        except Exception as e:
+            print(f"Error en pitch.flow: {e}")
+    
+    # Título del gráfico
+    ax.set_title(f'Mapa de Flujo de Pases - {team_name}', color=TEXT_COLOR)
+    
+    return fig
+def create_team_heatmap(df_equipos, team_name, season_ids):
+    """Crea el mapa de calor de acciones del equipo"""
+    pitch = Pitch(pitch_type='wyscout', pitch_color=BACKGROUND_COLOR, line_color=PRIMARY_COLOR)
+    fig, ax = plt.subplots(figsize=(10, 8), facecolor=BACKGROUND_COLOR)
+    
     df_acciones = df_equipos[
         (df_equipos['equipo'] == team_name) &
         (df_equipos['season_id'].isin(season_ids))
@@ -85,249 +263,87 @@ def create_heatmap(df_equipos, team_name, season_ids):
     for col in ['xstart', 'ystart']:
         df_acciones[col] = pd.to_numeric(df_acciones[col], errors='coerce')
     
-    # Crear el campo de fútbol
-    fig = create_football_pitch()
+    pitch.draw(ax=ax)
     
-    if not df_acciones.empty:
-        # Crear heatmap
-        fig.add_trace(go.Histogram2d(
-            x=df_acciones['xstart'],
-            y=df_acciones['ystart'],
-            colorscale=[[0, BACKGROUND_COLOR], [1, HIGHLIGHT_COLOR]],
-            opacity=0.6,
-            showscale=False
-        ))
-    
-    fig.update_layout(
-        title=f'Mapa de Calor - {team_name}',
-        title_x=0.5,
-        title_font_color=TEXT_COLOR,
-        paper_bgcolor=BACKGROUND_COLOR,
-        plot_bgcolor=BACKGROUND_COLOR
+    bin_statistic = pitch.bin_statistic(
+        df_acciones['ystart'], 
+        df_acciones['xstart'], 
+        statistic='count', 
+        bins=(20, 20)
     )
     
+    # Suavizar el heatmap
+    bin_statistic['statistic'] = gaussian_filter(bin_statistic['statistic'], 1)
+    
+    # Crear un mapa de color personalizado
+    cmap = LinearSegmentedColormap.from_list('custom', [BACKGROUND_COLOR, PRIMARY_COLOR])
+    
+    pitch.heatmap(bin_statistic, ax=ax, cmap=cmap, edgecolors=BACKGROUND_COLOR)
+    
+    ax.set_title(f'Mapa de Calor - {team_name}', color=TEXT_COLOR)
     return fig
 
-def create_flow_map(df_equipos, team_name, season_ids):
-    """Crea el mapa de flujo de pases usando Plotly"""
-    df_pases = df_equipos[
-        (df_equipos['equipo'] == team_name) &
-        (df_equipos['season_id'].isin(season_ids)) &
-        (df_equipos['tipo_evento'] == 'Pase')
-    ].copy()
+def create_lineup_visualization(df_lineups, team_name):
+    """Crea la visualización de alineaciones"""
+    pitch = Pitch(pitch_type='wyscout', pitch_color=BACKGROUND_COLOR, line_color=PRIMARY_COLOR)
+    fig, ax = plt.subplots(figsize=(10, 8), facecolor=BACKGROUND_COLOR)
     
-    for col in ['xstart', 'ystart', 'xend', 'yend']:
-        df_pases[col] = pd.to_numeric(df_pases[col], errors='coerce')
+    df_team = df_lineups[df_lineups['team_name'] == team_name].copy()
     
-    # Crear el campo de fútbol
-    fig = create_football_pitch()
+    # Convertir coordenadas
+    df_team['position_x'] = pd.to_numeric(df_team['position_x'], errors='coerce') * 100
+    df_team['position_y'] = pd.to_numeric(df_team['position_y'], errors='coerce') * 100
     
-    if not df_pases.empty:
-        # Añadir flechas de pases
-        fig.add_trace(go.Scatter(
-            x=df_pases['xstart'],
-            y=df_pases['ystart'],
-            mode='markers+lines',
-            line=dict(color=LINE_COLOR, width=1),
-            marker=dict(size=2, color=LINE_COLOR),
-            opacity=0.6
-        ))
+    pitch.draw(ax=ax)
     
-    fig.update_layout(
-        title=f'Mapa de Flujo de Pases - {team_name}',
-        title_x=0.5,
-        title_font_color=TEXT_COLOR
+    # Añadir posiciones promedio
+    ax.scatter(
+        df_team['position_x'], 
+        df_team['position_y'], 
+        color=PRIMARY_COLOR, 
+        s=100, 
+        alpha=0.7
     )
     
+    for _, row in df_team.iterrows():
+        ax.annotate(
+            row['player_name'], 
+            (row['position_x'], row['position_y']), 
+            xytext=(5, 5),
+            textcoords='offset points',
+            fontsize=8,
+            color=TEXT_COLOR
+        )
+    
+    ax.set_title(f'Alineaciones - {team_name}', color=TEXT_COLOR)
     return fig
 
-def create_lineup_viz(df_lineups, team_name):
-    """Crea la visualización de alineaciones usando Plotly"""
-    fig = create_football_pitch()
-    
-    if not df_lineups.empty:
-        df_team = df_lineups[df_lineups['team_name'] == team_name].copy()
-        
-        # Convertir coordenadas
-        df_team['position_x'] = pd.to_numeric(df_team['position_x'], errors='coerce') * 100
-        df_team['position_y'] = pd.to_numeric(df_team['position_y'], errors='coerce') * 100
-        
-        # Añadir posiciones promedio
-        fig.add_trace(go.Scatter(
-            x=df_team['position_x'],
-            y=df_team['position_y'],
-            mode='markers+text',
-            marker=dict(size=15, color='white'),
-            text=df_team['position_name'],
-            textposition="top center",
-            hoverinfo='text',
-            hovertext=df_team.apply(lambda x: f"{x['player_name']} {x['player_last_name']}", axis=1)
-        ))
-    
-    fig.update_layout(
-        title=f'Alineaciones más utilizadas - {team_name}',
-        title_x=0.5,
-        title_font_color=TEXT_COLOR
-    )
-    
-    return fig
-
-def create_evolution_plot(df_equipos, team_name, temporada):
-    """Crea el gráfico de evolución usando Plotly"""
-    df_team = df_equipos[df_equipos['equipo'] == team_name].copy()
-    
-    # Procesar datos de evolución
-    df_team['xg'] = pd.to_numeric(df_team['xg'], errors='coerce')
-    df_team['minute'] = pd.to_numeric(df_team['event_time'].str.split(':').str[0], errors='coerce')
-    df_team.loc[df_team['periodo'] == '2ª_parte', 'minute'] += 45
-    
-    # Crear gráfico
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        x=df_team['minute'],
-        y=df_team['xg'].cumsum(),
-        name=team_name,
-        line=dict(color=HIGHLIGHT_COLOR)
-    ))
-    
-    fig.update_layout(
-        title=f'Evolución xG - {team_name}',
-        xaxis_title='Minuto',
-        yaxis_title='xG Acumulado',
-        paper_bgcolor=BACKGROUND_COLOR,
-        plot_bgcolor=BACKGROUND_COLOR,
-        font_color=TEXT_COLOR,
-        showlegend=True
-    )
-    
-    return fig
-
-def create_kpi_radar(df_KPI, team_name):
-    """Crea el gráfico de radar de KPIs usando Plotly"""
-    kpi_columns = [
-        'Progresion_Ataque',
-        'Verticalidad',
-        'Ataques_Bandas',
-        'Peligro_Generado',
-        'Rendimiento_Finalizacion',
-        'Eficacia_Defensiva',
-        'Estilo_Combinativo_Directo',
-        'Zonas_Recuperacion',
-        'Altura_Bloque_Defensivo',
-        'Posesion_Dominante',
-        'KPI_Rendimiento'
-    ]
-    
-    # Calcular valores promedio
-    team_data = df_KPI[df_KPI['equipo'] == team_name][kpi_columns].mean()
-    
-    # Crear gráfico de radar
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatterpolar(
-        r=team_data.values,
-        theta=kpi_columns,
-        fill='toself',
-        name=team_name,
-        line_color=HIGHLIGHT_COLOR
-    ))
-    
-    fig.update_layout(
-        polar=dict(
-            radialaxis=dict(
-                visible=True,
-                range=[0, 10]
-            )
-        ),
-        showlegend=False,
-        paper_bgcolor=BACKGROUND_COLOR,
-        plot_bgcolor=BACKGROUND_COLOR,
-        font_color=TEXT_COLOR,
-        title=f'KPIs - {team_name}'
-    )
-    
-    return fig
-
-def create_kpi_evolution(df_KPI, team_name):
-    """Crea el gráfico de evolución de KPIs usando Plotly"""
-    df_team = df_KPI[df_KPI['equipo'] == team_name].copy()
-    
-    fig = go.Figure()
-    
-    fig.add_trace(go.Bar(
-        x=df_team['jornada'],
-        y=df_team['KPI_Rendimiento'],
-        marker_color=HIGHLIGHT_COLOR,
-        name='KPI Rendimiento'
-    ))
-    
-    fig.update_layout(
-        title=f'Evolución KPI Rendimiento - {team_name}',
-        xaxis_title='Jornada',
-        yaxis_title='KPI Rendimiento',
-        paper_bgcolor=BACKGROUND_COLOR,
-        plot_bgcolor=BACKGROUND_COLOR,
-        font_color=TEXT_COLOR,
-        showlegend=True
-    )
-    
-    return fig
-
-def create_football_pitch():
-    """Crea un campo de fútbol usando Plotly"""
-    fig = go.Figure()
-    
-    # Dimensiones del campo
-    field_length = 120
-    field_width = 80
-    
-    # Dibujar el campo
-    fig.add_shape(
-        type="rect",
-        x0=0, y0=0,
-        x1=field_length, y1=field_width,
-        line=dict(color=LINE_COLOR),
-        fillcolor=BACKGROUND_COLOR,
-    )
-    
-    # Añadir líneas y áreas
-    # ... (añadir más formas para las líneas del campo)
-    
-    fig.update_layout(
-        paper_bgcolor=BACKGROUND_COLOR,
-        plot_bgcolor=BACKGROUND_COLOR,
-        showlegend=False,
-        xaxis=dict(showgrid=False, zeroline=False),
-        yaxis=dict(showgrid=False, zeroline=False)
-    )
-    
-    return fig
-
-# Layout principal
-app.layout = html.Div([
-    # Banner
-    html.Div([
-        html.H1("Equipos - Academia Deportivo Alavés",
-                style=custom_styles['banner_title'])
-    ], style=custom_styles['banner']),
+# Layout de la página
+layout = dbc.Container([
+    # Navbar
+    html.Div("Equipos - Academia Deportivo Alavés", className='navbar'),
     
     # Contenedor principal
     dbc.Container([
+        # Mensaje de error si no se cargan los datos
+        html.Div(id='error-message', style={'color': 'red', 'textAlign': 'center'}),
+        
         # Filtros
         dbc.Row([
             dbc.Col([
+                html.Label("Seleccionar Equipo"),
                 dcc.Dropdown(
                     id='team-select',
                     placeholder="Seleccionar Equipo",
-                    style={'backgroundColor': '#262730', 'color': 'black'}
+                    className='form-control'
                 )
             ], width=6),
             dbc.Col([
+                html.Label("Seleccionar Temporada"),
                 dcc.Dropdown(
                     id='season-select',
                     placeholder="Seleccionar Temporada",
-                    style={'backgroundColor': '#262730', 'color': 'black'}
+                    className='form-control'
                 )
             ], width=6)
         ], className="mb-4"),
@@ -338,178 +354,123 @@ app.layout = html.Div([
                 dbc.Button("Generar Visualización", 
                           id="generate-viz", 
                           color="primary",
-                          className="me-2")
+                          className="w-100")
             ], width=3),
             dbc.Col([
-                html.Div(id='team-info', style=custom_styles['metric_card'])
+                html.Div(id='team-info', className='login-container')
             ], width=3),
             dbc.Col([
-                html.Div(id='season-info', style=custom_styles['metric_card'])
+                html.Div(id='season-info', className='login-container')
             ], width=3),
             dbc.Col([
-                html.Div(id='matches-info', style=custom_styles['metric_card'])
+                html.Div(id='matches-info', className='login-container')
             ], width=3)
         ], className="mb-4"),
         
-        # Loading spinner
-        dbc.Spinner(html.Div(id="loading-output")),
-        
-        # Visualizaciones
-        dbc.Row([
-            dbc.Col([
-                dcc.Graph(id='heatmap-graph')
-            ], width=6),
-            dbc.Col([
-                dcc.Graph(id='flow-graph')
-            ], width=6)
-        ], className="mb-4"),
-        
-        dbc.Row([
-            dbc.Col([
-                dcc.Graph(id='lineup-graph')
-            ], width=6),
-            dbc.Col([
-                dcc.Graph(id='evolution-graph')
-            ], width=6)
-        ], className="mb-4"),
-        
-        dbc.Row([
-            dbc.Col([
-                dcc.Graph(id='kpi-radar')
-            ], width=6),
-            dbc.Col([
-                dcc.Graph(id='kpi-evolution')
-            ], width=6)
-        ])
+        # Contenedor para visualizaciones
+        html.Div(id='visualizations-container', className='row')
     ], fluid=True)
-], style=custom_styles['background'])
+], style={'backgroundColor': BACKGROUND_COLOR})
 
 # Callbacks
-@app.callback(
+@callback(
     [Output('team-select', 'options'),
-     Output('team-select', 'value')],
-    Input('_', 'children')
+     Output('team-select', 'value'),
+     Output('error-message', 'children')],
+    Input('generate-viz', 'id')
 )
 def init_teams(_):
-    """Inicializa las opciones de equipos"""
-    df_filtros = DataManagerTeams.get_filter_data()
-    if df_filtros is not None:
-        equipos_alaves = [equipo for equipo in df_filtros['equipo'].unique() 
-                         if 'Alav' in equipo]
-        options = [{'label': equipo, 'value': equipo} for equipo in sorted(equipos_alaves)]
-        return options, None
-    return [], None
+    if GLOBAL_DATA is None or FILTER_DATA is None:
+        return [], None, "Error: No se pudieron cargar los datos"
+    
+    try:
+        equipos = [str(equipo) for equipo in sorted(FILTER_DATA['equipo'].unique())]
+        options = [{'label': equipo, 'value': equipo} for equipo in equipos]
+        
+        return options, options[0]['value'], ""
+    except Exception as e:
+        return [], None, f"Error: {e}"
 
-@app.callback(
+@callback(
     Output('season-select', 'options'),
     Input('team-select', 'value')
 )
 def update_seasons(team):
-    """Actualiza las opciones de temporada basado en el equipo seleccionado"""
-    if not team:
+    if not team or GLOBAL_DATA is None:
         return []
     
-    df_filtros = DataManagerTeams.get_filter_data()
-    if df_filtros is not None:
-        temporadas = df_filtros[df_filtros['equipo'] == team]['temporada'].unique()
-        return [{'label': t, 'value': t} for t in sorted(temporadas)]
-    return []
+    try:
+        temporadas = sorted(GLOBAL_DATA[GLOBAL_DATA['equipo'] == team]['temporada'].unique())
+        return [{'label': temporada, 'value': temporada} for temporada in temporadas]
+    except Exception as e:
+        print(f"Error en update_seasons: {e}")
+        return []
 
-@app.callback(
-    [Output('team-info', 'children'),
-     Output('season-info', 'children'),
-     Output('matches-info', 'children'),
-     Output('heatmap-graph', 'figure'),
-     Output('flow-graph', 'figure'),
-     Output('lineup-graph', 'figure'),
-     Output('evolution-graph', 'figure'),
-     Output('kpi-radar', 'figure'),
-     Output('kpi-evolution', 'figure'),
-     Output('loading-output', 'children')],
+@callback(
+    Output('visualizations-container', 'children'),
     Input('generate-viz', 'n_clicks'),
     [State('team-select', 'value'),
      State('season-select', 'value')]
 )
 def update_visualizations(n_clicks, team, season):
-    """Actualiza todas las visualizaciones cuando se presiona el botón"""
     if not n_clicks or not team or not season:
-        return generate_empty_outputs()
+        return []
     
     try:
-        # Cargar datos
-        df_detailed = DataManagerTeams.get_detailed_data(team, season)
-        df_lineups = DataManagerTeams.get_lineup_data()
-        
-        if df_detailed is None:
-            return generate_empty_outputs()
+        # Filtrar datos
+        df_detailed = DataManager.filter_data(GLOBAL_DATA, team, season)
         
         # Obtener season_ids
         season_ids = df_detailed['season_id'].unique().tolist()
         
-        # Generar métricas
-        n_matches = len(df_detailed['match_id'].unique())
-        team_info = html.Div([
-            html.H4("Equipo", className="text-white"),
-            html.P(team, className="text-white")
-        ])
-        season_info = html.Div([
-            html.H4("Temporada", className="text-white"),
-            html.P(season, className="text-white")
-        ])
-        matches_info = html.Div([
-            html.H4("Partidos", className="text-white"),
-            html.P(str(n_matches), className="text-white")
-        ])
-        
         # Generar visualizaciones
-        heatmap_fig = create_heatmap(df_detailed, team, season_ids)
-        flow_fig = create_flow_map(df_detailed, team, season_ids)
-        lineup_fig = create_lineup_viz(df_lineups, team)
-        evolution_fig = create_evolution_plot(df_detailed, team, season)
-        kpi_radar_fig = create_kpi_radar(df_detailed, team)
-        kpi_evolution_fig = create_kpi_evolution(df_detailed, team)
+        metrics_fig = create_team_advanced_metrics(df_detailed, team, season_ids)  # Pasar team y season_ids
+        pass_flow_fig = create_team_pass_flow_map(df_detailed, team, season_ids)
+        heatmap_fig = create_team_heatmap(df_detailed, team, season_ids)
         
-        return (
-            team_info, season_info, matches_info,
-            heatmap_fig, flow_fig, lineup_fig,
-            evolution_fig, kpi_radar_fig, kpi_evolution_fig,
-            ""
-        )
+        # Convertir figuras de matplotlib a imágenes base64
+        from io import BytesIO
+        import base64
         
+        def fig_to_base64(fig):
+            buf = BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight')
+            plt.close(fig)  # Cerrar la figura después de guardarla
+            buf.seek(0)
+            return base64.b64encode(buf.getvalue()).decode('utf-8')
+        
+        visualizations = [
+            dbc.Col([
+                html.H4("Métricas del Equipo", className="text-center"),
+                html.Img(
+                    src=f'data:image/png;base64,{fig_to_base64(metrics_fig)}',
+                    className='img-fluid'
+                )
+            ], width=6),
+            dbc.Col([
+                html.H4("Mapa de Flujo de Pases", className="text-center"),
+                html.Img(
+                    src=f'data:image/png;base64,{fig_to_base64(pass_flow_fig)}',
+                    className='img-fluid'
+                )
+            ], width=6),
+            dbc.Col([
+                html.H4("Mapa de Calor", className="text-center"),
+                html.Img(
+                    src=f'data:image/png;base64,{fig_to_base64(heatmap_fig)}',
+                    className='img-fluid'
+                )
+            ], width=12)
+        ]
+        
+        return visualizations
+    
     except Exception as e:
         print(f"Error en update_visualizations: {e}")
-        print(traceback.format_exc())
-        return generate_empty_outputs()
+        import traceback
+        traceback.print_exc()
+        return [html.Div(f"Error: {e}", className="alert alert-danger")]
 
-def generate_empty_outputs():
-    """Genera salidas vacías para cuando no hay datos"""
-    empty_fig = go.Figure()
-    empty_fig.update_layout(
-        paper_bgcolor=BACKGROUND_COLOR,
-        plot_bgcolor=BACKGROUND_COLOR,
-        font_color=TEXT_COLOR
-    )
-    
-    empty_div = html.Div([
-        html.H4("Sin datos", className="text-white"),
-        html.P("Seleccione equipo y temporada", className="text-white")
-    ])
-    
-    return [empty_div] * 3 + [empty_fig] * 6 + [""]
-
-# Función para exportar a PDF (si se necesita)
-def generate_pdf_report(team, season):
-    """Genera un reporte PDF de las visualizaciones"""
-    try:
-        # Aquí iría la lógica para generar el PDF
-        pass
-    except Exception as e:
-        print(f"Error generando PDF: {e}")
-        return None
-
-# Al final del archivo equipo.py, después de definir app.layout, añade:
-layout = app.layout
-
-# Mantén el if __name__ == '__main__': después de esto
+# Ejecutar la aplicación
 if __name__ == '__main__':
     app.run_server(debug=True, port=8050)
