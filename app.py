@@ -3,9 +3,7 @@ import dash
 import pandas as pd
 import dash_bootstrap_components as dbc
 from pages import equipo, jugador, partido
-from data_manager_teams import DataManagerTeams  # Cambiado de DataManager a DataManagerTeams
 from dash.dependencies import Input, Output
-
 
 # Cargar datos de usuarios
 df_users = pd.read_csv("data/usuarios.csv")
