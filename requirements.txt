@@ -5,3 +5,4 @@ plotly
 fastparquet
 matplotlib
 mplsoccer
+reportlab
