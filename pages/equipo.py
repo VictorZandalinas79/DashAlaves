@@ -38,15 +38,9 @@ LINE_COLOR = '#007bff'
 class DataManager:
     @staticmethod
     def load_parquet_data(file_path):
-        """Carga datos desde un archivo Parquet"""
         try:
-            # Leer el archivo Parquet
-            df = pd.read_parquet(file_path)
-            
-            # Convertir columnas a tipos de datos consistentes
-            df['equipo'] = df['equipo'].astype(str)
-            df['temporada'] = df['temporada'].astype(str)
-            
+            df = pd.read_parquet(file_path, engine='fastparquet', columns=['equipo', 'temporada'])
+            df = df.astype({'equipo': 'category', 'temporada': 'category'})
             return df
         except Exception as e:
             print(f"Error cargando archivo {file_path}: {e}")
