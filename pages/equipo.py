@@ -39,8 +39,10 @@ class DataManager:
     @staticmethod
     def load_parquet_data(file_path):
         try:
-            df = pd.read_parquet(file_path, engine='fastparquet', columns=['equipo', 'temporada'])
-            df = df.astype({'equipo': 'category', 'temporada': 'category'})
+            df = pd.read_parquet(file_path, engine='fastparquet')
+            df['equipo'] = df['equipo'].astype('category') 
+            df['temporada'] = df['temporada'].astype('category')
+            df['season_id'] = df['season_id'].astype('category')
             return df
         except Exception as e:
             print(f"Error cargando archivo {file_path}: {e}")
