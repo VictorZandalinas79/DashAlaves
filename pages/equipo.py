@@ -39,10 +39,24 @@ class DataManager:
     @staticmethod
     def load_parquet_data(file_path):
         try:
-            df = pd.read_parquet(file_path, engine='fastparquet')
-            df['equipo'] = df['equipo'].astype('category') 
-            df['temporada'] = df['temporada'].astype('category')
-            df['season_id'] = df['season_id'].astype('category')
+            columns = [
+                'event_id', 'season_id', 'temporada', 'equipo', 'jugador', 'tipo_evento',
+                'xstart', 'ystart', 'xend', 'yend',
+                'duelos_aereos_ganados_zona_area', 'duelos_aereos_ganados_zona_baja', 
+                'duelos_aereos_ganados_zona_media', 'duelos_aereos_ganados_zona_alta',
+                'recuperaciones_zona_baja', 'recuperaciones_zona_media', 'recuperaciones_zona_alta',
+                'entradas_ganadas_zona_area', 'entradas_ganadas_zona_baja', 
+                'entradas_ganadas_zona_media', 'entradas_ganadas_zona_alta',
+                'pases_largos_exitosos', 'cambios_orientacion_exitosos',
+                'pases_adelante_inicio', 'pases_adelante_creacion',
+                'pases_horizontal_inicio', 'pases_horizontal_creacion'
+            ]
+            df = pd.read_parquet(file_path, engine='fastparquet', columns=columns)
+            df = df.astype({
+                'equipo': 'category',
+                'temporada': 'category',
+                'season_id': 'category'
+            })
             return df
         except Exception as e:
             print(f"Error cargando archivo {file_path}: {e}")
