@@ -7,3 +7,4 @@ matplotlib
 mplsoccer
 reportlab
 dash_ag_grid
+pyarrow
